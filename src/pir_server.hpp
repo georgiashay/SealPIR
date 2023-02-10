@@ -2,6 +2,7 @@
 
 #include "pir.hpp"
 #include "pir_client.hpp"
+#include "tools.hpp"
 #include <map>
 #include <memory>
 #include <vector>

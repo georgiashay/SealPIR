@@ -181,7 +181,6 @@ PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id) {
     product *= nvec[i];
   }
 
-  auto coeff_count = enc_params_.poly_modulus_degree();
 
   vector<Plaintext> *cur = db_.get();
   vector<Plaintext> intermediate_plain; // decompose....
@@ -244,18 +243,62 @@ PirReply PIRServer::generate_reply(PirQuery &query, uint32_t client_id) {
     vector<Ciphertext> intermediateCtxts(product);
     Ciphertext temp;
 
-    for (uint64_t k = 0; k < product; k++) {
+    const auto &context_data2 = context_->first_context_data();
+    auto &parms2 = context_data2->parms();
+    auto &coeff_modulus = parms2.coeff_modulus();
+    size_t coeff_mod_count = coeff_modulus.size();
+    size_t coeff_count = parms2.poly_modulus_degree();
 
-      evaluator_->multiply_plain(expanded_query[0], (*cur)[k],
-                                 intermediateCtxts[k]);
+    uint64_t num_coeff = coeff_count * coeff_mod_count;
 
-      for (uint64_t j = 1; j < n_i; j++) {
-        evaluator_->multiply_plain(expanded_query[j], (*cur)[k + j * product],
-                                   temp);
-        evaluator_->add_inplace(intermediateCtxts[k],
-                                temp); // Adds to first component.
+    // Copy coefficient moduli information into vector
+    std::vector<uint64_t> coeff_moduli;
+    std::vector<uint128_t> m;
+
+    for (int i = 0; i < coeff_modulus.size(); i++) {
+        coeff_moduli.push_back(coeff_modulus[i].value());
+        const uint64_t* const_ratio_ = coeff_modulus[i].const_ratio().data();
+        uint128_t const_ratio = ((uint128_t)(const_ratio_[1]) << 64) + (uint128_t)(const_ratio_[0]);
+        m.push_back(const_ratio);
+    }
+
+    uint64_t* queryMatrix = (uint64_t*)malloc(n_i * 2 * num_coeff * sizeof(uint64_t)); 
+    uint64_t* inputMatrix = (uint64_t*)malloc(n_i * product * num_coeff * sizeof(uint64_t));
+    uint64_t* outputMatrix = (uint64_t*)malloc(product * 2 * num_coeff * sizeof(uint64_t));
+
+    // Copy query ciphertexts
+    for (uint64_t k = 0; k < n_i; k++) {
+      for (uint64_t c = 0; c < 2; c++) {
+        uint64_t* poly_data = expanded_query[k].data(c);
+        memcpy((void*)&queryMatrix[k * 2 * num_coeff + c * num_coeff], (void*)poly_data, num_coeff * sizeof(uint64_t)); 
       }
     }
+
+    // Copy input matrix
+    for (uint64_t k = 0; k < n_i * product; k++) {
+      uint64_t* poly_data = (*cur)[k].data();
+      memcpy((void*)&inputMatrix[k * num_coeff], (void*)poly_data, num_coeff * sizeof(uint64_t));
+    }
+
+    // Multiply matrices to multiply query vector
+    mul_matrix_matrix_mod(queryMatrix, 1, n_i, 2, 1, inputMatrix, n_i, product, 1, 1, outputMatrix, coeff_count, coeff_moduli, m);
+
+    free(queryMatrix);
+    free(inputMatrix);
+
+    // Copy into intermediateCtxts
+    for (uint64_t k = 0; k < product; k++) {
+      intermediateCtxts[k].resize(*context_.get(), context_->first_context_data()->parms_id(), 2);
+
+      for (uint64_t c = 0; c < 2; c++) {
+        uint64_t* poly_data = intermediateCtxts[k].data(c);
+        memcpy((void*)poly_data, (void*)&outputMatrix[k * 2 * num_coeff + c * num_coeff], num_coeff * sizeof(uint64_t));
+      }
+      intermediateCtxts[k].is_ntt_form() = true;
+      intermediateCtxts[k].parms_id() = context_->first_context_data()->parms_id();
+    }
+
+    free(outputMatrix);
 
     for (uint32_t jj = 0; jj < intermediateCtxts.size(); jj++) {
       evaluator_->transform_from_ntt_inplace(intermediateCtxts[jj]);
